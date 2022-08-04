@@ -68,6 +68,8 @@ Step 1.3: Load in AIS Data from Daily .csv Files, Subset to Retain LL vessels, &
 ###Name the Data Directory where you have the Unprocessed Data Stored
 data_dir <- 'C:/Users/timot/Desktop/Code_Sharing/Unprocessed_Data/Unprocessed_GFW_AIS_Data/'
 
+###Input .csv Files Downloaded from GFW Website:
+###https://globalfishingwatch.org/data-download/datasets/public-fishing-effort
 ###Data Processing Code Adapted From GFW Website:
 ###https://globalfishingwatch.org/data/working-with-our-downloadable-public-data-in-r/
 ###Be sure to specify the year and corresponding dates of the data you want to process 
