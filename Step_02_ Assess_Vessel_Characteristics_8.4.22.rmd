@@ -1,0 +1,410 @@
+***NOTE THAT ALL CODE WAS DEVELOPED AND TESTED WITH THE PACKAGE VERSIONS REFERENCED BELOW and R-4.0.5***
+
+Step 2.1 Set Directory and Load Packages
+```{r, setup, include=FALSE}
+
+rm(list=ls())
+
+### Change to the directory on your local machine where the files for this process are being stored
+knitr::opts_knit$set(root.dir = "C:/Users/timot/Desktop/Code_Sharing") 
+
+### Packages will need to be installed your first run through
+library(sf)   ###Version 0.9-8
+library(raster)   ###Version 3.4-5
+library(dplyr)   ###Version 1.0.5    
+library(rgeos)   ###Version 0.5-5
+library(ggplot2)   ###Version 3.3.3
+library(data.table)   ###Version 1.14.0
+library(forcats)   ###Version 0.5.1  
+library(reshape2)   ###Version 1.4.4
+library(purrr)   ###Version 0.3.4
+library(distances)   ###Version 0.1.8
+library(cluster)   ###Version 2.1.1
+library(tidyr)   ###Version 1.1.3
+library(parallel)   ###Version 1.24.0
+library(furrr)    ###Version 0.2.2
+library(lubridate)    ###Version 1.7.10
+library(tidyverse)   ###Version 1.3.0
+library(tictoc)   ###Version 1.0
+library(maptools)   ###Version 1.1-1
+library(lwgeom)   ###Version 0.2-5
+library(rmapshaper)   ###Version 0.4.4
+
+```
+
+
+Step 2.2: Assess Annual EEZ Behavior for Each Vessel
+```{r, warning=FALSE, message=FALSE}
+###Choose The Year That You Want to Obtain Characteristics For
+Selected_Year<-"2017"
+
+###Processed Fishing Data Produced in Step 1A
+coarse_res_Fishing_Data<-read.csv("Processed_AIS_Fishing_Data/2017_V2_LL_Pacific.csv")
+coarse_res_Fishing_Data<-coarse_res_Fishing_Data[which(coarse_res_Fishing_Data$fishing_hours > 0),]
+coarse_res_Fishing_Data$Lon<-coarse_res_Fishing_Data$Lon +.05
+coarse_res_Fishing_Data$Lat<-coarse_res_Fishing_Data$Lat +.05
+
+###Download From https://globalfishingwatch.org/data-download/datasets/public-fishing-effort
+registry<-read.csv('fishing-vessels-v2.csv')
+registry<-registry[which(registry$vessel_class_gfw=="drifting_longlines"),]
+flag_registry<-registry[c(1,4)]
+names(flag_registry)[2]<-"flag"
+flag_registry$mmsi<-as.character(flag_registry$mmsi)
+
+###Shapefiles Available in Github Directory
+Pacific_EEZ<-read_sf('shapefiles/Pacific_EEZ.shp')
+Map<-read_sf('shapefiles/Pacific_Landmasses.shp')
+Pacific_EEZ[is.na(Pacific_EEZ)]= "NONE"
+Pacific_EEZ$area<- st_area(Pacific_EEZ) ## Get aggregate shapefiles for all EEZ areas and all 
+
+## Get Aggregate Shapefiles for all EEZ Areas and All High Seas Areas
+AllEEZ<- Pacific_EEZ %>% summarise(area = sum(area))
+Pacific<-read_sf('Shapefiles/Pacific_Ocean.shp')
+Pacific_Simp<-st_simplify(st_make_valid(Pacific), dTolerance = .1)
+HighSeas <-st_difference(Pacific_Simp, AllEEZ)
+HighSeas<- HighSeas %>% summarise(area = sum(area))
+
+ggplot() + geom_sf(data=Pacific_EEZ, fill='blue') + theme_bw() + geom_sf(data = Map, fill="red")
+
+###Find Flag of Each Vessel
+new_fishing_data<-merge(coarse_res_Fishing_Data, flag_registry, by="mmsi", all.x=TRUE)
+names(new_fishing_data)[7]<-"flag"
+
+##Summarize Hours By Coordinates
+new_fishing_data$fishing_hours<-as.numeric(new_fishing_data$fishing_hours)
+new_fishing_data <- new_fishing_data %>% 
+  group_by(mmsi,flag,Lon,Lat) %>% 
+  summarize(fishing_hours = sum(fishing_hours, na.rm = T))
+
+new_fishing_data$flag <-new_fishing_data$flag %>% replace_na("MISSING")
+
+
+###Set Up and Run EEZ Processing Loop; this will take quite a bit of time
+
+Ships <-as.data.frame(unique(new_fishing_data$mmsi))                      
+names(Ships) <- c("mmsi")
+List_mmsi<-as.list(as.character(Ships$mmsi))
+Vessel_Behavior<-NULL
+
+tic()
+
+for (i in 1:length(List_mmsi)){
+  Ship = List_mmsi[i]
+  print(Ship)
+  Single_Ship<-new_fishing_data[which(new_fishing_data$mmsi==Ship),]
+  Dominant_Flag= Single_Ship %>% group_by(mmsi) %>% summarize(flag=names(which.max(table(flag))))
+  Single_Flag<-as.character(Dominant_Flag[1,2])
+  Single_effort <- st_as_sf(Single_Ship, coords = c('Lon', 'Lat'), crs = "+init=epsg:4326")
+  Total_Hours<-as.numeric(sum(Single_Ship$fishing_hours))
+  Foreign_EEZ<-Pacific_EEZ[(!Pacific_EEZ$ISO_TER1 == Single_Flag),] 
+  Foreign_EEZ<-Foreign_EEZ[which(!Foreign_EEZ$ISO_SOV1== Single_Flag),] 
+  Foreign_EEZ$area<-st_area(Foreign_EEZ)
+  All_Foreign_EEZ<- Foreign_EEZ %>% summarise(area = sum(area))
+  Single_Foreign_EEZ_effort<-st_intersection(Single_effort, All_Foreign_EEZ)
+  Single_HighSeas_effort <-st_intersection(Single_effort, HighSeas)
+  Foreign_EEZ_Percentage<-sum(Single_Foreign_EEZ_effort$fishing_hours)/Total_Hours
+  HighSeas_Percentage<-sum(Single_HighSeas_effort$fishing_hours)/Total_Hours
+  Value<-as.data.frame(c(Ship, Foreign_EEZ_Percentage, HighSeas_Percentage))
+  names(Value)<-c("mmsi", "Foreign_EEZ_Percentage", "HighSeas")
+  Vessel_Behavior<-rbind(Vessel_Behavior, Value)
+}
+
+toc()
+
+Vessel_Behavior$mmsi<-as.character(Vessel_Behavior$mmsi)
+
+###Output as .csv file to be used as an input for Step 3
+###write.csv(Vessel_Behavior, "Clustering_Characteristics/Selected_Year_EEZ_8.4.22.csv", row.names=FALSE))
+
+```
+
+Step 2.3A: Load CGI Function 
+```{r, echo=FALSE, include=FALSE}
+#----COG function----
+"cgi" <-  function(x = long, y = lat, z = NA, w = NA, modproj = NA, mlong = NA, 
+                   mlat = NA, col = 1, plot = T)
+{
+  #===============================================================================
+  # CENTER OF GRAVITY, INERTIA AND ISOTROPY
+  #
+  # Routine from Geostatistics for Estimating Fish Abundance (GEFA)
+  # & EU program Fisboat, DG-Fish, STREP nÂ° 502572
+  # Authors : M.Woillez (Mines-ParisTech), N.Bez (IRD) 
+  #           and J.Rivoirard (Mines-ParisTech)
+  # Last update : 01 march 2008 
+  #
+  # Argument:
+  #	x	      The x-coordinate (MUST be a vector).
+  #	y	      The y-coordinates (MUST be a vector).
+  #	z	      The regionalised variable in 2d (MUST be a vector). 
+  #         If missing, the results of 'cgi' will concern the samples only.
+  # w	      Optional. A weight or a area of influence. Set to 1 if missing
+  #	modproj	Optional. Indicates the type of projection to perform.
+  # mlong   mean longitude in DEGREES of the data set to be transformed
+  # mlat    mean latitude in DEGREES of the data set to be transformed
+  #	        See 'dg2nm' for precisions.
+  #	col	    Color for representing the axes.
+  #	plot	  If plot=T the principal axes of the inertia are automatically 
+  #		      plotted on an ALREADY EXISTING figure.
+  #
+  #	The output consists in a list with :
+  #	xcg, ycg	    the coordinates of the center of gravity of z
+  #	I	            the value of the inertia of z around its center of gravity
+  # Imax          the value of the inertia of z according to the first principal 
+  #               axes of the inertia
+  # Imin          the value of the inertia of z according to the second principal 
+  #               axes of the inertia
+  #	Iso           the value of the isotropy of z
+  # xaxe1, yaxe1  the coordinates of the first principal axes of the inertia of z
+  # xaxe2, yaxe2	the coordinates of the second principal axes of the inertia of z
+  #
+  #===============================================================================
+  
+  miss <- function(x){
+    length(x) == 1 && is.na(x)
+  }
+  if(miss(z))
+    z <- rep(1, length(x))
+  if(miss(w))
+    w <- rep(1, length(x))
+  sel <- !is.na(x * y * z * w)
+  x <- x[sel]
+  y <- y[sel]
+  z <- z[sel]
+  w <- w[sel]
+  if(length(x[!is.na(x)]) > 0) {
+    if(!miss(modproj)) {
+      bid <- dg2nm(x = x, y = y, modproj = modproj, mlong = mlong, mlat = mlat)
+      x <- bid$x
+      y <- bid$y
+    }
+    # Center of gravity coordinates
+    xg <- sum(x * z * w)/sum(z * w)
+    yg <- sum(y * z * w)/sum(z * w)
+    
+    # Inertia
+    dx <- x - xg
+    dy <- y - yg
+    d <- sqrt(dx^2 + dy^2)
+    inert <- sum(z * w * (d^2))/sum(z * w)
+    I <- inert	
+    
+    # Weigthed PCA 
+    if(!is.na(I)) {
+      M11 <- sum(dx^2 * z * w)
+      M22 <- sum(dy^2 * z * w)
+      M21 <- sum(dx * dy * z * w)
+      M12 <- M21
+      M <- matrix(c(M11, M12, M21, M22), byrow = T, ncol = 2)
+      x1 <- eigen(M)$vectors[1, 1]
+      y1 <- eigen(M)$vectors[2, 1]
+      x2 <- eigen(M)$vectors[1, 2]
+      y2 <- eigen(M)$vectors[2, 2]
+      r1 <- eigen(M)$values[1]/(eigen(M)$values[1] + eigen(M)$values[2])
+      
+      # Principal axis coordinates
+      e1 <- (y1/x1)^2
+      sx1 <- x1/abs(x1)
+      sy1 <- y1/abs(y1)
+      sx2 <- x2/abs(x2)
+      sy2 <- y2/abs(y2)
+      xa <- xg + sx1 * sqrt((r1 * inert)/(1 + e1))
+      ya <- yg + sy1 * sqrt((r1 * inert)/(1 + (1/e1)))
+      xb <- 2 * xg - xa
+      yb <- 2 * yg - ya
+      xc <- xg + sx2 * sqrt(((1 - r1) * inert)/(1 + (1/e1)))
+      yc <- yg + sy2 * sqrt(((1 - r1) * inert)/(1 + e1))
+      xd <- 2 * xg - xc
+      yd <- 2 * yg - yc
+      Imax <- r1*inert 
+      Imin <- (1-r1)*inert
+      Iso <- sqrt(Imin/Imax)
+    }
+    else {
+      xa <- NA
+      ya <- NA
+      xb <- NA
+      yb <- NA
+      xc <- NA
+      yc <- NA
+      xd <- NA
+      yd <- NA
+      Imax <- NA
+      Imin <- NA
+      Iso <- NA
+    }
+    if(!miss(modproj)) {
+      bid <- nm2dg(x = c(xg, xa, xb, xc, xd), y = c(yg, ya, yb, yc, yd), 
+                   modproj = modproj, mlong = mlong, mlat = mlat)
+      res <- list(xcg = bid$x[1], ycg = bid$y[1], I = I, Imax = Imax, 
+                  Imin = Imin, Iso = Iso, xaxe1 = bid$x[2:3], yaxe1 = bid$y[2:3], 
+                  xaxe2 = bid$x[4:5],	yaxe2 = bid$y[4:5])
+    }
+    else res <- list(xcg = xg, ycg = yg, I = I, Imax = Imax, Imin = Imin, 
+                     Iso = Iso, xaxe1 = c(xa, xb), yaxe1 = c(ya, yb), xaxe2 = c(xc, xd), 
+                     yaxe2 = c(yc, yd))
+    if(plot == T) {
+      segments(res$xaxe1[1], res$yaxe1[1], res$xaxe1[2], res$yaxe1[2], col = col)
+      segments(res$xaxe2[1], res$yaxe2[1], res$xaxe2[2], res$yaxe2[2], col = col)
+    }
+  }
+  else {
+    res <- list(xcg = NA, ycg = NA, I = NA, Imax = NA, 
+                Imin = NA, Iso = NA, xaxe1 = NA, yaxe1 = NA, xaxe2 = NA, yaxe2 = NA)
+  }
+  res
+}
+
+```
+
+
+Step 2.3B: Calculate Annual COG, Seasonal COG, & Inertia for Each Vessel
+```{r, warning=FALSE, message=FALSE}
+coarse_res_Fishing_Data$date<-as.Date(coarse_res_Fishing_Data$date)
+
+new_fishing_data <- coarse_res_Fishing_Data %>% 
+  mutate(year  = year(date),
+         month = month(date))
+
+new_fishing_data$month<-as.character(new_fishing_data$month)
+new_fishing_data$season <- fct_collapse(new_fishing_data$month,
+                                        Winter = c("10", "11", "12", "1", "2", "3"),
+                                        Summer = c("4", "5", "6", "7", "8", "9"))
+
+load.file <- function(filename) {
+  vessel_name<- as.character(unique(filename$mmsi))
+  Single_COG <- cgi(x = filename$Lon, y = filename$Lat, filename$fishing_hours, plot = F)
+  Single_COG <- data.frame(lon = c(Single_COG$xaxe1[1], Single_COG$xaxe1[2], Single_COG$xaxe2[1], Single_COG$xaxe2[2],  
+                                   Single_COG$xcg),
+                           lat = c(Single_COG$yaxe1[1], Single_COG$yaxe1[2], Single_COG$yaxe2[1], Single_COG$yaxe2[2],
+                                   Single_COG$ycg),group = c("A", "A", "B", "B","C"))
+  Point_Coord<-Single_COG[which(Single_COG$group=="C"),]
+  Line_Coord_A<-Single_COG[which(Single_COG$group=="A"),]
+  Line_Coord_B<-Single_COG[which(Single_COG$group=="B"),]	
+  Distance_A<-pointDistance(c(Line_Coord_A[1,1], Line_Coord_A[1,2]), c(Line_Coord_A[2,1],  Line_Coord_A[2,2]), lonlat=TRUE)
+  Distance_B<-pointDistance(c(Line_Coord_B[1,1], Line_Coord_B[1,2]), c(Line_Coord_B[2,1],  Line_Coord_B[2,2]), lonlat=TRUE)
+  Value<-as.data.frame(c(vessel_name, Point_Coord$lon, Point_Coord$lat, Distance_A, Distance_B))
+}
+
+Vessels.split<-split(new_fishing_data, new_fishing_data$mmsi)
+data <- lapply(Vessels.split, load.file) ###Make sure COG function is loaded
+output <- matrix(unlist(data), ncol = 5, byrow = TRUE)
+Single_COG<-as.data.frame(output)
+names(Single_COG)<-c("mmsi", "xcg", "ycg", "Distance_A", "Distance_B")
+Single_COG$Distance_A <- sub(NaN, 0, Single_COG$Distance_A)
+Single_COG$Distance_B <- sub(NaN, 0, Single_COG$Distance_B)
+Single_COG <- data.frame(lapply(Single_COG, as.character), stringsAsFactors=FALSE)
+Single_COG <- data.frame(lapply(Single_COG, as.numeric), stringsAsFactors=FALSE)
+Inertia<-Single_COG[c(1,4,5)]
+Single_COG<-Single_COG[c(1,2,3)]
+
+Seasonal_COG <-new_fishing_data %>% group_by(mmsi,season) %>% nest() %>% 
+  mutate(BB= map(data, ~cgi(x=.x$Lon, y=.x$Lat, z=.x$fishing_hours, plot=F))) %>% 
+  unnest_wider(BB)
+myvars<-c('season', 'mmsi', 'xcg', 'ycg')
+Seasonal_COG<-Seasonal_COG[myvars]
+Seasonal_COG<-as.data.frame(Seasonal_COG)
+
+##Output as .csv files to be used as an input for Step 3. Note that Annual_COG was not used in the final analysis
+##write.csv(Seasonal_COG, "Clustering_Characteristics/Selected_Year_Seasonal_COG_8.4.22.csv", row.names=FALSE)
+##write.csv(Single_COG, "Clustering_Characteristics/Selected_Year_Annual_COG_8.4.22.csv", row.names=FALSE)
+##write.csv(Inertia, "Clustering_Characteristics/Selected_Year_Inertia_8.4.22.csv", row.names=FALSE)
+```
+
+
+Step 2.4: Calculate Annual Estimated Overlap for Each Vessel for Each Focal Species
+```{r, warning=FALSE, message=FALSE}
+
+Pacific<-read_sf('Shapefiles/Pacific_Ocean.shp')
+Pacific_Simp<-st_simplify(Pacific, dTolerance = .1)
+r<-raster(Pacific_Simp)
+res(r)<-5
+r<-rasterize(Pacific_Simp, r)
+
+capture_long<-read.csv("Processed_RFMO_Data/RFMO_Data_Long_No_Flag_8.4.22.csv")
+capture_long$month<-substring(capture_long$year_month, 6)
+capture_long$year<- substr(capture_long$year_month, 1, 4)
+capture_long<-capture_long[c(2,3,5,6,7,8,9,10)]
+capture_long<-capture_long[which(capture_long$year==Selected_Year),]
+
+
+new_fishing_data<-new_fishing_data[order(new_fishing_data$mmsi),] 
+
+
+###Set up and Run Estimated Overlap Loop; This Will Take Some Time
+ships <-as.data.frame(unique(new_fishing_data$mmsi)) 
+names(ships) <- c("mmsi")
+List_Ships<-as.list(as.character(ships$mmsi))
+vessel_targets<-data.frame() 
+coarse_res_fleet<-data.frame()
+
+for (i in 1:length(List_Ships)){
+  Ship = List_Ships[i]
+  ship_fishing_data<-new_fishing_data[which(new_fishing_data$mmsi==Ship),]
+  time <-as.data.frame(unique(ship_fishing_data$month))                        
+  names(time) <- c("month")
+  List_Time<-as.list(as.character(time$month))
+  
+  coarse_res<-data.frame()        
+  
+  for (i in 1:length(List_Time)){
+    Time = List_Time[i]
+    Single_Step<- ship_fishing_data[which(ship_fishing_data$month == Time),]
+    asp<-SpatialPoints(Single_Step[,5:6],
+                       proj4string=CRS("+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0"))
+    asp <- SpatialPointsDataFrame(asp, Single_Step)
+    catch<-rasterize(coordinates(asp), r, asp$fishing_hours, fun='sum', background=0)
+    coords <- as.matrix(coordinates(catch))
+    df <- data.frame(Longitude = coords[, 1], Latitude = coords[, 2], as.data.frame(catch))
+    df<-df[which(df$layer > 0 ),]
+    df$Time<-Time
+    coarse_res<-rbind(coarse_res, df)
+  }
+  
+  names(coarse_res)<- c("x","y", "fishing_hours", "month")
+  coarse_res$vessel<-Ship
+  coarse_res$month<-as.character(coarse_res$month)
+  vessel_cells<-merge(coarse_res, capture_long, by=c("x", "y", "month"))
+  vessel_cells$focus<-vessel_cells$percentage*vessel_cells$fishing_hours
+  First_Try<-try(aggregate(focus~month, FUN=sum, data=vessel_cells))
+  Total_hours<-if(class(First_Try) %in% 'try-error') {next} else {aggregate(focus~month, FUN=sum, data=vessel_cells)}
+  Species<-aggregate(focus~species+month, FUN=sum, data=vessel_cells)
+  Combined_focus<-left_join(Species, Total_hours, by="month")
+  Combined_focus$weighted<-Combined_focus$focus.x/Combined_focus$focus.y
+  Total<-sum(Combined_focus$weighted)
+  Total_Species<-aggregate(weighted~species, FUN=sum, data=Combined_focus)
+  Total_Species$allocated_effort<-Total_Species$weighted/Total
+  Total_Species$mmsi<-Ship
+  vessel_targets<-rbind(vessel_targets, Total_Species)
+}
+
+vessel_targets_mod<-vessel_targets[c(-2)]
+vessel_targets_mod<-data.frame(lapply(vessel_targets_mod, as.character), stringsAsFactors=FALSE)
+vessel_targets_mod$species<-as.factor(vessel_targets_mod$species)
+vessel_targets_mod$allocated_effort<-as.numeric(vessel_targets_mod$allocated_effort)
+vessel_targets_mod<-spread(vessel_targets_mod, species, allocated_effort) 
+vessel_targets_mod$other_cc<-vessel_targets_mod$other_cc+vessel_targets_mod$blm_cc+
+  + vessel_targets_mod$mls_cc+vessel_targets_mod$skj_cc + vessel_targets_mod$bum_cc
+vessel_targets_mod<-vessel_targets_mod[c(1,2,3,7,9,10)]
+vessel_targets_mod$mmsi<-as.character(vessel_targets_mod$mmsi)
+
+##Output as .csv files to be used as an input for Step 3. 
+##write.csv(vessel_targets_mod, "Clustering_Characteristics/Selected_Year_Catch_8.4.22.csv", row.names=FALSE)
+```
+
+Step 2.5: Obtain Vessel Characteristics
+```{r}
+
+registry<-read.csv('fishing-vessels-v2.csv')
+registry<-registry[which(registry$vessel_class_gfw=="drifting_longlines"),]
+registry<-registry[c(1,12,18)]
+
+names(registry)<-c("mmsi", "length", "tonnage")
+registry$mmsi<-as.character(registry$mmsi)
+
+ships$mmsi<-as.character(ships$mmsi)
+registry<-as.data.frame(setDT(registry)[mmsi %chin% ships$mmsi])
+
+##Output as .csv files to be used as an input for Step 3. 
+###write.csv(registry, "Clustering_Characteristics/Selected_Year_attributes_8.4.22.csv", row.names=FALSE)
+```

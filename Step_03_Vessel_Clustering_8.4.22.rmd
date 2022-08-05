@@ -1,0 +1,299 @@
+***NOTE THAT ALL CODE WAS DEVELOPED AND TESTED WITH THE PACKAGE VERSIONS REFERENCED IN THE FINAL MANUSCRIPT***
+
+Step 3.1. Set Directory and Load Packages
+```{r, warning=FALSE, message=FALSE}
+
+rm(list=ls())
+
+### Change to the directory on your local machine where the files for this process are being stored
+knitr::opts_knit$set(root.dir = "C:/Users/timot/Desktop/Code_Sharing") 
+
+### Packages will need to be installed your first run through
+library(sf)   ###Version 0.9-8
+library(raster)   ###Version 3.4-5
+library(dplyr)   ###Version 1.0.5
+library(rgeos)   ###Version 0.5-5
+library(ggplot2)   ###Version 3.3.3
+library(data.table)   ###Version 1.14.0
+library(forcats)   ###Version 0.5.1
+library(reshape2)   ###Version 1.4.4
+library(purrr)   ###Version 0.3.4
+library(distances)   ###Version 0.1.8
+library(cluster)   ###Version 2.1.1
+library(tidyr)   ###Version 1.1.3
+library(parallel)   ###Version 1.24.0
+library(furrr)   ###Version  0.2.2
+library(lubridate)   ###Version  1.7.10
+library(tidyverse)   ###Version 1.3.0
+library(tictoc)   ###Version 1.0
+library(maptools)   ###Version 1.1-1
+library(factoextra)   ###Version 1.0.7
+library(clv)   ###Version 0.2-2.2
+```
+
+
+Step 3.2: Load in and Subset Fishing Data 
+```{r}
+new_fishing_data<-read.csv("Processed_AIS_Fishing_Data/2017_V2_LLP_fh_0.25.csv")
+new_fishing_data<-new_fishing_data[which(new_fishing_data$fishing_hours > 1),]
+
+new_fishing_data$mmsi<-as.character(new_fishing_data$mmsi)
+new_fishing_data$date<-as.Date(new_fishing_data$date)
+
+new_fishing_data <- new_fishing_data %>% 
+  mutate(year  = year(date),
+         month = month(date))
+
+
+###Download From https://globalfishingwatch.org/data-download/datasets/public-fishing-effort
+registry<-read.csv('fishing-vessels-v2.csv')
+registry<-registry[which(registry$vessel_class_gfw=="drifting_longlines"),]
+flag_registry<-registry[c(1,4)]
+
+new_fishing_data<-merge(new_fishing_data, flag_registry, by="mmsi", all.x=TRUE)
+names(new_fishing_data)[8]<-"flag"
+
+new_fishing_data$month<-as.character(new_fishing_data$month)
+new_fishing_data$quarter <- fct_collapse(new_fishing_data$month,
+                                         One = c("1", "2", "3"),
+                                         Two = c("4", "5", "6"),
+                                         Three = c("7", "8", "9"),
+                                         Four = c("10", "11", "12"))
+
+```
+
+
+Step 3.3: Prepare Dissimilarity Matrix for Annual Clustering
+```{r}
+
+###INPUTS FROM STEP 2
+Inertia<-read.csv('Clustering_Characteristics/2017_Inertia_8.4.22.csv')
+EEZ<-read.csv('Clustering_Characteristics/2017_EEZ_8.4.22.csv')
+Seasonal_COG<-read.csv("Clustering_Characteristics/2017_Seasonal_COG_8.4.22.csv")
+Catch<-read.csv("Clustering_Characteristics/2017_Catch_8.4.22.csv")
+Attributes<-read.csv("Clustering_Characteristics/2017_attributes_8.4.22.csv")
+
+
+###Intertia
+Inertia<-as.matrix(distances(Inertia, id_variable="mmsi", normalize="studentize"))
+Inertia_df<-setNames(melt(Inertia), c('V1', 'V2', 'Inertia'))
+Inertia_df<-as.data.table(Inertia_df)
+rm(Inertia)
+
+##EEZ
+EEZ$mmsi<-as.character(EEZ$mmsi)
+EEZ$Home<- (1 -(EEZ$HighSeas + EEZ$Foreign_EEZ_Percentage))
+EEZ<-EEZ[order(EEZ$mmsi),]
+EEZ<-as.matrix(distances(EEZ, id_variable="mmsi", normalize="studentize"))
+EEZ_df<-setNames(melt(EEZ), c('V1', 'V2', 'EEZ'))
+EEZ_df<-as.data.table(EEZ_df)
+
+
+###Seasonal COG
+Winter_COG<-Seasonal_COG[which(Seasonal_COG$season == 'Winter'),]
+Winter_COG <- Winter_COG[order(Winter_COG$mmsi),]
+Winter_COG$xcg<-(Winter_COG$xcg*pi)/180
+Winter_COG$ycg<-(Winter_COG$ycg*pi)/180
+Winter_COG$x<-6371*cos(Winter_COG$ycg) * cos(Winter_COG$xcg)
+Winter_COG$y<-6371*cos(Winter_COG$ycg) * sin(Winter_COG$xcg)
+Winter_COG$z<-6371*sin(Winter_COG$ycg) 
+Winter_COG<-Winter_COG[c(2,5,6,7)] ##Subset to retain columns "mmsi", "x", "y", and "z"
+Winter_COG<-as.matrix(distances(Winter_COG, id_variable="mmsi", normalize="studentize")) 
+Winter_COG_df<-setNames(melt(Winter_COG), c('V1', 'V2', 'Winter_COG'))
+Winter_COG_df<-as.data.table(Winter_COG_df)
+
+Summer_COG<-Seasonal_COG[which(Seasonal_COG$season == 'Summer'),]
+Summer_COG <- Summer_COG[order(Summer_COG$mmsi),]
+Summer_COG$xcg<-(Summer_COG$xcg*pi)/180
+Summer_COG$ycg<-(Summer_COG$ycg*pi)/180
+Summer_COG$x<-6371*cos(Summer_COG$ycg) * cos(Summer_COG$xcg)
+Summer_COG$y<-6371*cos(Summer_COG$ycg) * sin(Summer_COG$xcg)
+Summer_COG$z<-6371*sin(Summer_COG$ycg) 
+Summer_COG<-Summer_COG[c(2,5,6,7)] ##Subset to retain columns "mmsi", "x", "y", and "z"
+Summer_COG<-as.matrix(distances(Summer_COG, id_variable="mmsi", normalize="studentize"))
+Summer_COG_df<-setNames(melt(Summer_COG), c('V1', 'V2', 'Summer_COG'))
+Summer_COG_df<-as.data.table(Summer_COG_df)
+rm(Seasonal_COG, Summer_COG, Winter_COG)
+
+
+###Catch
+Catch <- Catch[order(Catch$mmsi),]
+Catch <-as.matrix(distances(Catch, id_variable="mmsi", normalize="studentize"))
+Catch_df<-setNames(melt(Catch), c('V1', 'V2', 'Catch'))
+Catch_df<-as.data.table(Catch_df)
+rm(Catch)
+
+###Attributes
+Attributes <- Attributes[order(Attributes$mmsi),]
+Attributes<-Attributes[complete.cases(Attributes),]
+Attributes<-Attributes %>% mutate_at(c("length", "tonnage"), ~(scale(.) %>% as.vector))
+Attributes <-as.matrix(distances(Attributes, id_variable="mmsi", normalize="studentize"))
+Attributes_df<-setNames(melt(Attributes), c('V1', 'V2', 'Attributes'))
+Attributes_df<-as.data.table(Attributes_df)
+rm(Attributes)
+
+
+###Build Pairwise Dissimilarity Data Frame
+
+Combined_COG_df<-merge(Winter_COG_df, Summer_COG_df,  by=c("V1", "V2"), all.x=TRUE, all.y=TRUE)
+rm(Winter_COG_df, Summer_COG_df)
+
+Combined_ALL_df<-merge(Combined_COG_df, Inertia_df,  by=c("V1", "V2"), all.x=TRUE, all.y=TRUE)
+rm(Inertia_df, Combined_COG_df)
+
+Combined_ALL_df<-merge(Combined_ALL_df, EEZ_df,  by=c("V1", "V2"), all.x=TRUE)
+rm(EEZ_df)
+
+Combined_ALL_df<-merge(Combined_ALL_df, Attributes_df,  by=c("V1", "V2"), all.x=TRUE)
+rm(Attributes_df)
+
+Combined_ALL_df<-merge(Combined_ALL_df, Catch_df, by=c("V1", "V2"), all.x=TRUE)
+rm(Catch_df)
+
+###Make sure Dissimilarity Values are Zero When Columns Compared to Themselves
+Combined_ALL_df$Summer_COG<- ifelse(Combined_ALL_df$V1==Combined_ALL_df$V2, 0, Combined_ALL_df$Summer_COG)
+Combined_ALL_df$Winter_COG<- ifelse(Combined_ALL_df$V1==Combined_ALL_df$V2, 0, Combined_ALL_df$Winter_COG)
+Combined_ALL_df$Attributes<- ifelse(Combined_ALL_df$V1==Combined_ALL_df$V2, 0, Combined_ALL_df$Attributes)
+Combined_ALL_df$Inertia<- ifelse(Combined_ALL_df$V1==Combined_ALL_df$V2, 0, Combined_ALL_df$Inertia)
+Combined_ALL_df$EEZ<- ifelse(Combined_ALL_df$V1==Combined_ALL_df$V2, 0, Combined_ALL_df$EEZ)
+Combined_ALL_df$Catch<- ifelse(Combined_ALL_df$V1==Combined_ALL_df$V2, 0, Combined_ALL_df$Catch)
+
+###Replace NAs with Column Means
+Only_Pairs<-Combined_ALL_df[!(Combined_ALL_df$V1==Combined_ALL_df$V2),]
+col_means <- lapply(Only_Pairs, mean, na.rm = TRUE)
+
+###Find Average Pairwise Dissimilarity
+Combined_ALL_df<- replace_na(Combined_ALL_df, col_means)
+Combined_ALL_df$Average<-(Combined_ALL_df$Winter_COG + Combined_ALL_df$Summer +
+    Combined_ALL_df$Inertia + Combined_ALL_df$Catch + Combined_ALL_df$Attributes + Combined_ALL_df$EEZ)/6
+    Combined_ALL_df<-Combined_ALL_df[order(Combined_ALL_df$V1, Combined_ALL_df$V2),]
+    Combined_ALL_df<-as.data.frame(Combined_ALL_df)
+    Average_df<-Combined_ALL_df[c(1,2,9)]
+
+###Recast as Matrix and Distance Matrix
+Vessels<-as.data.frame(unique(Average_df$V1))
+names(Vessels)<-c("mmsi")
+
+Average_matrix<-dcast(Average_df, V1~V2, value.var="Average")
+rownames(Average_matrix) <- Average_matrix[,1]
+Average_matrix <- Average_matrix[,-1]
+Average_matrix<-as.matrix(Average_matrix)
+Distance_matrix<-as.dist(Average_matrix)
+
+```
+
+Step 3.4 PAM Clustering
+```{r}
+
+###Identify Optimal Cluster Number Using Silhouette Method
+Ks=sapply(2:25,
+    function(i) 
+      summary(silhouette(pam((Distance_matrix), k=i)))$avg.width)
+plot(2:25,Ks, xlab="k",ylab="av.silhouette",type="b", pch=19)
+
+###Export These Values for Comparison with other Years
+Annual_Silhouette_Values<-as.data.frame(Ks)
+
+###Cluster using choosen number of groups
+Clusters<-pam(Distance_matrix, 11)
+
+###Validation Metrics for Final Grouping
+Distance_Matrix<-as.matrix(Distance_matrix)
+Annual_Validation<-cls.scatt.diss.mx(Distance_Matrix, Clusters$clustering)
+
+```
+
+
+Step 3.5 Visualize PAM Clustering
+
+```{r}
+Map<-read_sf('shapefiles/Pacific_Landmasses.shp')
+mycols <- colors()[c(473,562,71,610,655,653,621,34)] 
+mypalette <- colorRampPalette(mycols)(255)
+
+Vessels<-as.data.frame(unique(Average_df$V1))
+names(Vessels)<-c("mmsi")
+
+Vessels$group<-Clusters$clustering
+###See How Many Clusters are Assigned to Each Group
+aggregate(mmsi~group, FUN=length, data=Vessels)
+
+##Choose the Specific Cluster you Want to Visualize
+Single_Group<-Vessels[which(Vessels$group==11),]
+Member_Vessels<-as.data.frame(unique(Single_Group$mmsi))
+names(Member_Vessels)<-c("mmsi")
+Member_Vessels$mmsi<-as.character(Member_Vessels$mmsi)
+Member_data<-setDT(new_fishing_data)[mmsi %chin% Member_Vessels$mmsi]
+
+Member_effort <- Member_data %>%
+  group_by(Lon,Lat,quarter) %>% 
+  summarize(fishing_hours = sum(fishing_hours, na.rm = T),
+            log_fishing_hours = log10(sum(fishing_hours, na.rm = T))) %>% 
+  ungroup()  %>% 
+  mutate(log_fishing_hours = ifelse(log_fishing_hours <= .5, .5, log_fishing_hours),
+         log_fishing_hours = ifelse(log_fishing_hours >= 4, 4, log_fishing_hours))
+
+ Member_effort %>%
+  ggplot() +
+  geom_raster(aes(x = Lon, y = Lat, fill = log_fishing_hours)) + 
+  geom_sf(data = Map, fill = '#999999', color = '#0A1738', size = 0.1)  +
+  scale_fill_gradientn("log(fishing hours)", colours = mypalette, na.value = NA) +theme_bw()  
+ 
+ ###Export this list when you are satisfied
+ 
+ ###write.csv(Vessels, "2019_Vessels_Clusters.csv")
+
+ 
+```
+
+
+ALTERNATE Step 3.4 Hierarchical Clustering
+```{r}
+Cluster_obj<-hclust(Distance_matrix, method='ward.D')
+plot(2:35, sapply(2:35, function(i) { 
+  mean(silhouette(cutree(Cluster_obj, i), dmatrix=Average_matrix)[,"sil_width"]) }),
+  xlab="Number of clusters", ylab="Average Silhouette", type="b", pch=20)
+
+Annual_Silhouette_Values<-as.data.frame(sapply(2:35, function(i) {mean(silhouette(cutree(Cluster_obj, i), dmatrix=Average_matrix)[,"sil_width"]) }))
+```
+
+
+ALTERNATE Step 3.4 Visualize Hierarchical Clustering
+```{r}
+Vessels<-as.data.frame(unique(Average_df$V1))
+names(Vessels)<-c("mmsi")
+
+
+Map<-read_sf('shapefiles/Pacific_Landmasses.shp')
+mycols <- colors()[c(473,562,71,610,655,653,621,34)] 
+mypalette <- colorRampPalette(mycols)(255)
+
+sub_grp <- cutree(Cluster_obj, 11)
+table(sub_grp)
+
+Vessel_Groups <- Vessels %>% mutate(cluster=sub_grp)
+names(Vessel_Groups)<-c("mmsi", "Fleet")
+
+Single_Group<-Vessel_Groups[which(Vessel_Groups$Fleet==10),]
+
+Member_Vessels<-as.data.frame(unique(Single_Group$mmsi))
+names(Member_Vessels)<-c("mmsi")
+
+Member_Vessels$mmsi<-as.character(Member_Vessels$mmsi)
+Member_data<-setDT(new_fishing_data)[mmsi %chin% Member_Vessels$mmsi]
+
+Member_effort <- Member_data %>% 
+  group_by(Lon,Lat,quarter) %>% 
+  summarize(fishing_hours = sum(fishing_hours, na.rm = T),
+            log_fishing_hours = log10(sum(fishing_hours, na.rm = T))) %>% 
+  ungroup()  %>% 
+  mutate(log_fishing_hours = ifelse(log_fishing_hours <= .5, .5, log_fishing_hours),
+         log_fishing_hours = ifelse(log_fishing_hours >= 4, 4, log_fishing_hours))
+
+ Member_effort %>%
+  ggplot() +
+  geom_raster(aes(x = Lon, y = Lat, fill = log_fishing_hours)) + 
+  geom_sf(data = Map, fill = '#999999', color = '#0A1738', size = 0.1) +
+  scale_fill_gradientn("log(fishing hours)", colours = mypalette, na.value = NA) + 
+  theme_bw()  
+```

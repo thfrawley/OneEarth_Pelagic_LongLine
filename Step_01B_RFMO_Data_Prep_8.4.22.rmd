@@ -1,0 +1,439 @@
+***NOTE THAT ALL CODE WAS DEVELOPED AND TESTED WITH THE PACKAGE VERSIONS REFERENCED BELOW and R-4.0.5***
+
+Step 1B.1: Set Directory and Load Packages
+```{r, setup, include=FALSE}
+
+rm(list=ls())
+
+### Change to the directory on your local machine where the files for this process are being stored
+knitr::opts_knit$set(root.dir = "C:/Users/timot/Desktop/Code_Sharing") 
+rm(list=ls())
+setwd("C:/Users/timot/Desktop/Code_Sharing")
+
+### Packages will need to be installed your first run through
+library(dplyr)    ###Version 1.0.5
+library(sf)    ###Version 0.9-8
+library(raster)    ###Version 3.4-5
+library(ggplot2)    ###Version 3.3.3
+library(gstat)    ###Version 2.0-7
+library(tibble)    ###Version 3.1.0
+library(tidyr)    ###Version 1.1.3
+library(reshape2)    ###Version 1.4.4
+```
+
+Step 1B.2: Import, Clean, and Aggregate IATTC Shark Data
+```{r, warning=FALSE, message=FALSE}
+Shark_Species<-list("BSH","FAL","OCS","SPN","THR","EDIT_MAK","EDIT_Other")
+
+###Data Dowloaded From IATTC Website (https://www.iattc.org/en-US/Data/Public-domain) on 1/28/2021; Version Dated 9/11/2020
+IATTC_Shark_Num<-read.csv("Unprocessed_Data/Unprocessed_RFMO_Data/PublicLLSharkNum_9.11.20.csv")
+IATTC_Shark_Num$EDIT_MAK<-IATTC_Shark_Num$MAKn + IATTC_Shark_Num$SMAn
+IATTC_Shark_Num$EDIT_OTHER<-IATTC_Shark_Num$CCLn + IATTC_Shark_Num$RSKn + IATTC_Shark_Num$SKHn 
+IATTC_Shark_Num<-IATTC_Shark_Num[c(1,2,3,4,5,6,7,9,11,15,16,27,28)]
+###This should retain the following columns: Year, Month, Flag, LatC5,  LonC5, Hooks, BSHn, FALn, OCSn, SPNn, THRn, EDIT_MAK, EDIT_OTHER
+
+
+###Data Dowloaded From IATTC Website (https://www.iattc.org/en-US/Data/Public-domain) on 1/28/2021; Version Dated 9/11/2020
+IATTC_Shark_Catch<-read.csv("Unprocessed_Data/Unprocessed_RFMO_Data/PublicLLSharkMt_9.11.20.csv")
+IATTC_Shark_Catch$EDIT_MAKmt<-IATTC_Shark_Catch$MAKmt + IATTC_Shark_Catch$SMAmt
+IATTC_Shark_Catch$EDIT_OTHERmt<-IATTC_Shark_Catch$CCLmt + IATTC_Shark_Catch$RSKmt + IATTC_Shark_Catch$SKHmt 
+IATTC_Shark_Catch<-IATTC_Shark_Catch[c(1,2,3,4,5,6,17,19,21,25,26,27,28)]
+###This should retain the following columns: Year, Month, Flag, LatC5,  LonC5, Hooks,  BSHmt, FALmt, OCSmt, SPNmt, THRmt, EDIT_MAKmt, EDIT_OTHERmt
+
+
+IATTC_Shark<-merge(IATTC_Shark_Num, IATTC_Shark_Catch, by= c("Year", "Month", "Flag", "LatC5", "LonC5", "Hooks"))
+
+IATTC_Shark$ID <- seq.int(nrow(IATTC_Shark))
+Shark_Grid_Info<-IATTC_Shark[c(1,2,3,4,5,6,21)]
+
+
+for (i in 1:length(Shark_Species)){
+  
+  Focal_Species = as.character(Shark_Species[[i]])
+  df <- IATTC_Shark%>% dplyr:: select(starts_with(Focal_Species))
+  df<-cbind(Shark_Grid_Info, df)
+  names(df)<-c("Year", "Month", "Flag", "y", "x", "hooks", "ID", "Number", "Tons")
+  Shark<-df
+  Shark<-Shark[which(Shark$Number > 0 & Shark$Tons > 0),]
+  Shark$Conversion<-Shark$Tons/Shark$Number
+  upper <- quantile(Shark$Conversion, 0.95, na.rm = TRUE)
+  lower <- quantile(Shark$Conversion, 0.05, na.rm = TRUE)
+  Shark <- within(Shark, Conversion[Conversion > upper] <- NA)
+  Shark <- within(Shark, Conversion[Conversion < lower] <- NA)
+  Shark<-aggregate(Conversion~x+y, data=Shark, FUN=mean)
+  Shark_raster<-rasterFromXYZ(Shark)
+  ###If you want to see what the raster looks like prior to interpolation
+  ###plot(Shark_raster)
+  mg <- gstat(id = "Conversion", formula = Conversion~1, locations = ~x+y, data=Shark, 
+              nmax=7, set=list(idp = .5))
+  z <- interpolate(Shark_raster, mg)
+  plot(z)
+  Shark_Conversion<-as.data.frame(z, xy=TRUE)
+  names(Shark_Conversion)[3]<-"Conversion"
+  Mean_Conversion<-mean(Shark_Conversion$Conversion)
+  Test<-merge(df, Shark_Conversion, by=c("y", "x"), all.x=TRUE)
+  Test$Conversion <-ifelse(is.na(Test$Conversion), Mean_Conversion, Test$Conversion)
+  Test$Corrected_Number<-Test$Number
+  Test$Corrected_Number<- replace(Test$Corrected_Number, Test$Corrected_Number == 0, NA)
+  Test$Corrected_Number <- ifelse(is.na(Test$Corrected_Number), (Test$Tons/Test$Conversion), Test$Corrected_Number)
+  Test$Corrected_Catch<-Test$Tons
+  Test$Corrected_Catch<- replace(Test$Corrected_Catch, Test$Corrected_Catch == 0, NA)
+  Test$Corrected_Catch <- ifelse(is.na(Test$Corrected_Catch), (Test$Number *Test$Conversion), Test$Corrected_Catch)
+  Test <- Test[order(Test$ID),]
+  names(Test)[8]<-paste(Focal_Species,"_n", sep = "")
+  names(Test)[9]<-paste(Focal_Species,"_c", sep = "")
+  names(Test)[10]<-paste(Focal_Species,"_conversion", sep = "")
+  names(Test)[11]<-paste(Focal_Species,"_cn", sep = "")
+  names(Test)[12]<-paste(Focal_Species,"_cc", sep = "")
+  Test<-Test[c(8,9,10,11,12)]
+  assign(Focal_Species, Test)
+  print(Sys.time())
+}
+
+Shark<- cbind(BSH, FAL, EDIT_MAK, OCS, THR, SPN, EDIT_Other)
+IATTC_Sharks_Weight<-Shark[c(5,10,15,20,25,30,35)]
+##This should retain the following columns: BSH_cc, FAL_cc, EDIT_MAK_cc, OCS_cc, THR_cc, SPN_cc, EDIT_Other_cc,
+
+IATTC_Sharks_Weight<-as.data.frame(rowSums(IATTC_Sharks_Weight))
+names(IATTC_Sharks_Weight)<-"All_Shark_c"
+IATTC_Sharks_Weight<-cbind(Shark_Grid_Info, IATTC_Sharks_Weight)
+IATTC_Sharks_Weight<-IATTC_Sharks_Weight[c(-7)]
+```
+
+
+Step 1B.3: Import, Clean, and Aggregate IATTC Tuna & Billfish Data and Combine it with Outputs of 1B.2
+```{r, warning=FALSE, message=FALSE}
+
+
+Tuna_Species<-list("ALB","BET","PBF","SKJ","TUN","YFT","BIL", "BLM", "BUM", "MLS", "SFA", "SSP", "SWO")
+
+###Data Dowloaded From IATTC Website (https://www.iattc.org/en-US/Data/Public-domain) on 1/28/2021; Version Dated 9/11/2020
+IATTC_Tuna_Num<-read.csv("Unprocessed_Data/Unprocessed_RFMO_Data/PublicLLTunaBillfishNum_9.11.20.csv")
+IATTC_Tuna_Num<-IATTC_Tuna_Num[c(1:19)]
+##This should retain the following columns: Year, Month, Flag, LatC5,  LonC5, Hooks, ALBn, BETn, PBFn, SKJn, TUNn, YFTn, BILn, BLMn, BUMn, MLSn, SFAn, SSPn, SWOn
+
+IATTC_Tuna_Catch<-read.csv("Unprocessed_Data/Unprocessed_RFMO_Data/PublicLLTunaBillfishMt_9.11.20.csv")
+IATTC_Tuna_Catch<-IATTC_Tuna_Catch[c(1:6,20:32)]
+##This should retain the following columns: Year, Month, Flag, LatC5,  LonC5, Hooks, ALBmt, BETmt, PBFmt, SKJmt, TUNmt, YFTmt, BILmt, BLMmt, BUMmt, MLSmt, SFAmt, SSPmt, SWOmt
+
+IATTC_Tuna<-merge(IATTC_Tuna_Num, IATTC_Tuna_Catch, by= c("Year", "Month", "Flag", "LatC5", "LonC5", "Hooks"))
+
+IATTC_Tuna<- IATTC_Tuna[which(IATTC_Tuna$Year > 1978),]
+
+IATTC_Tuna$ID <- seq.int(nrow(IATTC_Tuna))
+Tuna_Grid_Info<-IATTC_Tuna[c(1,2,3,4,5,6,33)]
+
+
+for (i in 1:length(Tuna_Species)){
+  
+  Focal_Species = as.character(Tuna_Species[[i]])
+  df <- IATTC_Tuna%>% dplyr:: select(starts_with(Focal_Species))
+  df<-cbind(Tuna_Grid_Info, df)
+  names(df)<-c("Year", "Month", "Flag", "y", "x", "hooks", "ID", "Number", "Tons")
+  Tuna<-df
+  Tuna<-Tuna[which(Tuna$Number > 0 & Tuna$Tons > 0),]
+  Tuna$Conversion<-Tuna$Tons/Tuna$Number
+  upper <- quantile(Tuna$Conversion, 0.95, na.rm = TRUE)
+  lower <- quantile(Tuna$Conversion, 0.05, na.rm = TRUE)
+  Tuna <- within(Tuna, Conversion[Conversion > upper] <- NA)
+  Tuna <- within(Tuna, Conversion[Conversion < lower] <- NA)
+  Tuna<-aggregate(Conversion~x+y, data=Tuna, FUN=mean)
+  Tuna_raster<-rasterFromXYZ(Tuna)
+  ###If you want to see what the raster looks like prior to interpolation
+  ###plot(Tuna_raster)
+  mg <- gstat(id = "Conversion", formula = Conversion~1, locations = ~x+y, data=Tuna, 
+              nmax=7, set=list(idp = .5))
+  z <- interpolate(Tuna_raster, mg)
+  plot(z)
+  Tuna_Conversion<-as.data.frame(z, xy=TRUE)
+  names(Tuna_Conversion)[3]<-"Conversion"
+  Mean_Conversion<-mean(Tuna_Conversion$Conversion)
+  Test<-merge(df, Tuna_Conversion, by=c("y", "x"), all.x=TRUE)
+  Test$Conversion <-ifelse(is.na(Test$Conversion), Mean_Conversion, Test$Conversion)
+  Test$Corrected_Number<-Test$Number
+  Test$Corrected_Number<- replace(Test$Corrected_Number, Test$Corrected_Number == 0, NA)
+  Test$Corrected_Number <- ifelse(is.na(Test$Corrected_Number), (Test$Tons/Test$Conversion), Test$Corrected_Number)
+  Test$Corrected_Catch<-Test$Tons
+  Test$Corrected_Catch<- replace(Test$Corrected_Catch, Test$Corrected_Catch == 0, NA)
+  Test$Corrected_Catch <- ifelse(is.na(Test$Corrected_Catch), (Test$Number *Test$Conversion), Test$Corrected_Catch)
+  Test <- Test[order(Test$ID),]
+  names(Test)[8]<-paste(Focal_Species,"_n", sep = "")
+  names(Test)[9]<-paste(Focal_Species,"_c", sep = "")
+  names(Test)[10]<-paste(Focal_Species,"_conversion", sep = "")
+  names(Test)[11]<-paste(Focal_Species,"_cn", sep = "")
+  names(Test)[12]<-paste(Focal_Species,"_cc", sep = "")
+  Test<-Test[c(8,9,10,11,12)]
+  assign(Focal_Species, Test)
+  print(Focal_Species)
+  print(Sys.time())
+}
+
+###Bringing in the Shark Data From the Previous Step
+Shark_Weight<-merge(Tuna_Grid_Info, IATTC_Sharks_Weight, by=c("Year", "Month", "Flag", "LatC5", "LonC5"), all.x=TRUE)
+Shark_Weight <- Shark_Weight[order(Shark_Weight$ID),]
+Other<-cbind(Shark_Weight, PBF, BIL, TUN, SFA, SSP)
+Other<-Other[c(9,14,19,24,29,34)]
+Other<-as.data.frame(rowSums(Other))
+names(Other)<-"Other_cc"
+Other[is.na(Other)] = 0
+
+Tuna<-cbind(Tuna_Grid_Info,ALB,BET,SKJ,YFT, BLM, BUM, MLS, SWO, Other)
+Tuna<-Tuna[c(1,2,4,5,6,12, 17,22,27,32,37,42,47,48)]
+##This should retain the following columns: Year, Month, LatC5,  LonC5, Hooks, ALB_cc, BET_cc, SKJ_cc, YFT_cc, BLM_cc, BUM_cc, MLS_cc
+
+###Complete, Adjusted ITTAC Catch Data
+IATTC_Complete_Data<-Tuna
+
+##Some Formatting Adjustments to Ensure Compatibility with WCPFC Data
+for( i in colnames(IATTC_Complete_Data)){
+  colnames(IATTC_Complete_Data)[which(colnames(IATTC_Complete_Data)==i)] = tolower(i)}
+
+names(IATTC_Complete_Data)[3]<-'y'
+names(IATTC_Complete_Data)[4]<-'x'
+
+IATTC_Complete_Data$x <- ifelse(IATTC_Complete_Data$x < 0, IATTC_Complete_Data$x + 360, IATTC_Complete_Data$x)
+```
+
+
+Step 1B.4: Plot up the Data for Visual Quality Control
+```{r, warning=FALSE, message=FALSE}
+Plot_Test<-aggregate(hooks~x+y, data=IATTC_Complete_Data, FUN=sum)
+Map<-read_sf('Shapefiles/Pacific_Landmasses.shp')
+IATTC<-read_sf("Shapefiles/IATTC.shp")
+Pacific_IATTC<-st_shift_longitude(IATTC)
+WCPFC<-read_sf('Shapefiles/WCPFC.shp')
+Pacific_WCPFC<-st_shift_longitude(WCPFC)
+Pacific_WCPFC$area<-st_area(Pacific_WCPFC)
+Pacific_WCPFC <- Pacific_WCPFC %>% summarise(area = sum(area))
+
+ggplot() + 
+  geom_tile(data=Plot_Test, aes(x = x, y = y, fill = hooks)) +
+  geom_sf(data = Map,  fill = '#374a6d', color = '#0A1738', size = 0.1) +
+  geom_sf(data = Pacific_IATTC, fill=NA) +
+  geom_sf(data = Pacific_WCPFC, fill=NA) 
+
+```
+
+
+Step 1B.5: Import, Clean, and Aggregate WCPFC Data (Note, reporting by Numbers Only Much Less Common Here)
+```{r, warning=FALSE, message=FALSE}
+
+
+Species_List<-list("alb","yft","bet","mls","blm","bum","swo", "oth")
+
+##Data Downloaded From WCPFC Website (https://www.wcpfc.int/folder/public-domain-data) on 3/25/2021; Version Dated 3/25/2021
+WCPFC<-read.csv("Unprocessed_Data/Unprocessed_RFMO_Data/WCPFC_LL_5x5_Monthly_3.25.21.csv")
+
+###Little slice of code To fix lat-lon format
+{
+  names(WCPFC)[3]<-'lat_short'
+  names(WCPFC)[4]<-'lon_short'
+  WCPFC <- within(WCPFC, lat_short[lat_short == "00N"] <- 0)
+  WCPFC <- within(WCPFC, lat_short[lat_short == "05N"] <- 5)
+  WCPFC <- within(WCPFC, lat_short[lat_short == "10N"] <- 10)
+  WCPFC <- within(WCPFC, lat_short[lat_short == "15N"] <- 15)
+  WCPFC <- within(WCPFC, lat_short[lat_short == "20N"] <- 20)
+  WCPFC <- within(WCPFC, lat_short[lat_short == "25N"] <- 25)
+  WCPFC <- within(WCPFC, lat_short[lat_short == "30N"] <- 30)
+  WCPFC <- within(WCPFC, lat_short[lat_short == "35N"] <- 35)
+  WCPFC <- within(WCPFC, lat_short[lat_short == "40N"] <- 40)
+  WCPFC <- within(WCPFC, lat_short[lat_short == "45N"] <- 45)
+  WCPFC <- within(WCPFC, lat_short[lat_short == "50N"] <- 50)
+  WCPFC <- within(WCPFC, lat_short[lat_short == "55N"] <- 55)
+  WCPFC <- within(WCPFC, lat_short[lat_short == "60N"] <- 60)
+  WCPFC <- within(WCPFC, lat_short[lat_short == "05S"] <- -5)
+  WCPFC <- within(WCPFC, lat_short[lat_short == "10S"] <- -10)
+  WCPFC <- within(WCPFC, lat_short[lat_short == "15S"] <- -15)
+  WCPFC <- within(WCPFC, lat_short[lat_short == "20S"] <- -20)
+  WCPFC <- within(WCPFC, lat_short[lat_short == "25S"] <- -25)
+  WCPFC <- within(WCPFC, lat_short[lat_short == "30S"] <- -30)
+  WCPFC <- within(WCPFC, lat_short[lat_short == "35S"] <- -35)
+  WCPFC <- within(WCPFC, lat_short[lat_short == "40S"] <- -40)
+  WCPFC <- within(WCPFC, lat_short[lat_short == "45S"] <- -45)
+  WCPFC <- within(WCPFC, lat_short[lat_short == "50S"] <- -50)
+  WCPFC <- within(WCPFC, lat_short[lat_short == "55S"] <- -55)
+  WCPFC <- within(WCPFC, lat_short[lat_short == "60S"] <- -60)
+  WCPFC <- within(WCPFC, lat_short[lat_short == "65S"] <- -65)
+  WCPFC <- within(WCPFC, lat_short[lat_short == "70S"] <- -70)
+  WCPFC <- within(WCPFC, lat_short[lat_short == "75S"] <- -75)
+  WCPFC <- within(WCPFC, lat_short[lat_short == "80S"] <- -80)
+  WCPFC <- within(WCPFC, lat_short[lat_short == "85S"] <- -85)
+  WCPFC <- within(WCPFC, lon_short[lon_short == "100E"] <- 100)
+  WCPFC <- within(WCPFC, lon_short[lon_short == "105E"] <- 105)
+  WCPFC <- within(WCPFC, lon_short[lon_short == "110E"] <- 110)
+  WCPFC <- within(WCPFC, lon_short[lon_short == "115E"] <- 115)
+  WCPFC <- within(WCPFC, lon_short[lon_short == "120E"] <- 120)
+  WCPFC <- within(WCPFC, lon_short[lon_short == "125E"] <- 125)
+  WCPFC <- within(WCPFC, lon_short[lon_short == "130E"] <- 130)
+  WCPFC <- within(WCPFC, lon_short[lon_short == "135E"] <- 135)
+  WCPFC <- within(WCPFC, lon_short[lon_short == "140E"] <- 140)
+  WCPFC <- within(WCPFC, lon_short[lon_short == "145E"] <- 145)
+  WCPFC <- within(WCPFC, lon_short[lon_short == "150E"] <- 150)
+  WCPFC <- within(WCPFC, lon_short[lon_short == "155E"] <- 155)
+  WCPFC <- within(WCPFC, lon_short[lon_short == "160E"] <- 160)
+  WCPFC <- within(WCPFC, lon_short[lon_short == "165E"] <- 165)
+  WCPFC <- within(WCPFC, lon_short[lon_short == "170E"] <- 170)
+  WCPFC <- within(WCPFC, lon_short[lon_short == "175E"] <- 175)
+  WCPFC <- within(WCPFC, lon_short[lon_short == "180W"] <- 180)
+  WCPFC <- within(WCPFC, lon_short[lon_short == "175W"] <- 185)  
+  WCPFC <- within(WCPFC, lon_short[lon_short == "170W"] <- 190)
+  WCPFC <- within(WCPFC, lon_short[lon_short == "165W"] <- 195)
+  WCPFC <- within(WCPFC, lon_short[lon_short == "160W"] <- 200)
+  WCPFC <- within(WCPFC, lon_short[lon_short == "155W"] <- 205)
+  WCPFC <- within(WCPFC, lon_short[lon_short == "150W"] <- 210)
+  WCPFC <- within(WCPFC, lon_short[lon_short == "145W"] <- 215)
+  WCPFC <- within(WCPFC, lon_short[lon_short == "140W"] <- 220)
+  WCPFC <- within(WCPFC, lon_short[lon_short == "135W"] <- 225)
+  
+  WCPFC$lat_short<-as.character(WCPFC$lat_short)
+  WCPFC$lat_short<-as.numeric(WCPFC$lat_short)
+  WCPFC$lat_short<-WCPFC$lat_short + 2.5
+  
+  WCPFC$lon_short<-as.character(WCPFC$lon_short)
+  WCPFC$lon_short<-as.numeric(WCPFC$lon_short)
+  WCPFC$lon_short<-WCPFC$lon_short + 2.5
+  
+  names(WCPFC)[3]<-"y"
+  names(WCPFC)[4]<-"x"
+}
+WCPFC$ID <- seq.int(nrow(WCPFC))
+Grid_Info<-WCPFC[c(1,2,3,4,6,23)]
+
+for (i in 1:length(Species_List)){
+
+Focal_Species = as.character(Species_List[[i]])
+df <- WCPFC%>% dplyr:: select(starts_with(Focal_Species))
+df<-cbind(Grid_Info, df)
+names(df)<-c("Year", "Month", "y", "x", "hooks", "ID", "Tons", "Number")
+Species<-df
+
+Species<-Species[which(Species$Number > 0 & Species$Tons > 0),]
+Species$Conversion<-Species$Tons/Species$Number
+upper <- quantile(Species$Conversion, 0.95, na.rm = TRUE)
+lower <- quantile(Species$Conversion, 0.05, na.rm = TRUE)
+Species <- within(Species, Conversion[Conversion > upper] <- NA)
+Species <- within(Species, Conversion[Conversion < lower] <- NA)
+Species<-aggregate(Conversion~x+y, data=Species, FUN=mean)
+Species_raster<-rasterFromXYZ(Species)
+###If you want to see what the raster looks like prior to interpolation
+###plot(Species_raster)
+mg <- gstat(id = "Conversion", formula = Conversion~1, locations = ~x+y, data=Species, 
+            nmax=7, set=list(idp = .5))
+z <- interpolate(Species_raster, mg)
+plot(z, zlim=c(0,0.07))
+Species_Conversion<-as.data.frame(z, xy=TRUE)
+names(Species_Conversion)[3]<-"Conversion"
+Mean_Conversion<-mean(Species_Conversion$Conversion)
+Test<-merge(df, Species_Conversion, by=c("y", "x"), all.x=TRUE)
+Test$Conversion <-ifelse(is.na(Test$Conversion), Mean_Conversion, Test$Conversion)
+Test$Corrected_Catch<-Test$Tons
+Test$Corrected_Catch <- replace(Test$Corrected_Catch, Test$Corrected_Catch == 0, NA)
+Test$Corrected_Catch <- ifelse(is.na(Test$Corrected_Catch), (Test$Number*Test$Conversion), Test$Corrected_Catch)
+Test <- Test[order(Test$ID),]
+names(Test)[7]<-paste(Focal_Species,"_c", sep = "")
+names(Test)[8]<-paste(Focal_Species,"_n", sep = "")
+names(Test)[9]<-paste(Focal_Species,"_conversion", sep = "")
+names(Test)[10]<-paste(Focal_Species,"_cc", sep = "")
+Test<-Test[c(7,8,9,10)]
+assign(Focal_Species, Test)
+print(Sys.time())
+}
+
+WCPFC_Complete_Data<-cbind(Grid_Info,alb,bet, yft, blm, bum, mls,swo,oth)
+WCPFC_Complete_Data<-WCPFC_Complete_Data[c(1:6,10,14,18,22,26,30,34,38)]
+head(WCPFC_Complete_Data)
+###This should retain the following columns: yy, mm, y, x, hhooks, ID, alb_cc, bet_cc,  yft_cc, blm_cc, bum_cc, mls_cc, swo_cc, oth_cc,
+
+###Some Formatting to Match IATTC Data
+WCPFC_Complete_Data<-add_column(WCPFC_Complete_Data,  skj_cc= 0, .after = 8)
+
+for( i in colnames(WCPFC_Complete_Data)){
+  colnames(WCPFC_Complete_Data)[which(colnames(WCPFC_Complete_Data)==i)] = tolower(i)
+}
+
+names(WCPFC_Complete_Data)[1]<-'year'
+names(WCPFC_Complete_Data)[2]<-'month'
+names(WCPFC_Complete_Data)[5]<-'hooks'
+names(WCPFC_Complete_Data)[15]<-'other_cc'
+
+WCPFC_Complete_Data<-WCPFC_Complete_Data[c(-6)]
+
+###Remove Area of Overlapping Jurisdictions
+WCPFC_Complete_Data<-WCPFC_Complete_Data[which(WCPFC_Complete_Data$y > -60),]
+WCPFC_Complete_Data<-WCPFC_Complete_Data[which(WCPFC_Complete_Data$y < 60),]
+WCPFC_Complete_Data<-WCPFC_Complete_Data[which(WCPFC_Complete_Data$x < 210),]
+
+##Convert to hhooks
+WCPFC_Complete_Data$hooks<-WCPFC_Complete_Data$hooks*100
+
+
+Plot_Test<-aggregate(hooks~x+y, data=WCPFC_Complete_Data, FUN=sum)
+
+ggplot() + 
+  geom_tile(data=Plot_Test, aes(x = x, y = y, fill = hooks)) +
+  geom_sf(data = Map,  fill = '#374a6d', color = '#0A1738', size = 0.1) +
+  geom_sf(data = Pacific_IATTC, fill=NA) +
+  geom_sf(data = Pacific_WCPFC, fill=NA) 
+```
+
+Step 1B.6: Combine IATTC & WCPFC Data, Plot to Check it Out, Export if Satisfied
+```{r, warning=FALSE, message=FALSE}
+Full_Data<-rbind(IATTC_Complete_Data, WCPFC_Complete_Data)
+
+
+upper <- quantile(Full_Data$hooks, 0.999, na.rm = TRUE) # to remove strong upper outliers, likely errors
+Full_Data <- within(Full_Data, hooks[hooks > upper] <- NA)
+
+Plot_Test<-aggregate(hooks~x+y, data=Full_Data, FUN=sum)
+
+ggplot() + 
+  geom_tile(data=Plot_Test, aes(x = x, y = y, fill = hooks)) +
+  geom_sf(data = Map,  fill = '#374a6d', color = '#0A1738', size = 0.1) +
+  geom_sf(data = Pacific_IATTC, fill=NA) +
+  geom_sf(data = Pacific_WCPFC, fill=NA) 
+
+
+##write.csv(Full_Data, "Combined_Gridded_Monthly_Data.8.5.22.csv", row.names=FALSE)
+```
+
+Step 1B.7: Convert to Percentages and Long Format as an Input for Step 2 Assessing Characteristics in Step2
+```{r, warning=FALSE, message=FALSE}
+##rm(list=ls())
+##Full_Data<- read.csv("Combined_Gridded_Monthly_Data.8.5.22.csv")
+
+Full_Data <- Full_Data %>% unite(year_month, c("year", "month"))
+
+
+capture_all <- Full_Data %>% 
+  group_by(x,y, year_month) %>% 
+  summarize(alb_cc = sum(alb_cc, na.rm = T),
+            bet_cc= sum(bet_cc, na.rm = T),
+            skj_cc= sum(skj_cc, na.rm = T),
+            yft_cc = sum(yft_cc, na.rm = T),
+            blm_cc=sum(blm_cc, na.rm=T),
+            bum_cc=sum(bum_cc, na.rm=T),
+            mls_cc=sum(mls_cc, na.rm=T),
+            swo_cc = sum(swo_cc, na.m = T),
+            other_cc = sum(other_cc, na.rm=T))
+
+capture_all$total<-capture_all$alb_cc + capture_all$bet_cc + capture_all$skj_cc + 
+  capture_all$yft_cc + capture_all$blm_cc + capture_all$bum_cc +
+  capture_all$mls_cc + capture_all$swo_cc + capture_all$other_cc
+
+capture_all<-capture_all[which(capture_all$total>1),]
+capture_all<-capture_all[c(-13)]
+
+capture_long<-as.data.frame(melt(capture_all, id.vars=c("x", "y", "year_month"),
+                                 variable.name="species", value.name="catch"))
+
+cell_total<-aggregate(catch~x+y+year_month, data=capture_long, FUN=sum)
+capture_long<-merge(capture_long, cell_total, by=c("x", "y", "year_month"))
+capture_long$percentage<-capture_long$catch.x/capture_long$catch.y
+
+###write.csv(capture_long, "RFMO_Data_Long_No_Flag_8.4.22.csv", row.names=FALSE)
+
+```
+
+
+
+
