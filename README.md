@@ -12,3 +12,5 @@ Step 2 details the procedure for for calculating annual vessel clustering charac
 Step 3 details the procedure for annual clustering of all pelagic longline vessels engaged in fishing activity across the combined convention bounds of the IATTC and WCPFC. This procedure relies on inputs produced by Step 2, which can be accessed from the repository file "Clustering_Characteristics" for those interested in the clustering procedure separate from data processing (Step 1) and the assessment of annual vessel clustering characteristics (Step 2). The final results of the clustering procedure (integrating the outputs from each of the threes study years) are presented in Excel Worksheet "Data_S1_Final_Cluster_Assignments". 
 
 Additional queries and clarifications can be directed to Timothy Frawley, the lead author of the study, at tfrawley@ucsc.edu
+
+<a href="https://zenodo.org/badge/latestdoi/521413520"><img src="https://zenodo.org/badge/521413520.svg" alt="DOI"></a>
